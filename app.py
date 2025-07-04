@@ -2,11 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.neighbors import NearestNeighbors
 import matplotlib.pyplot as plt
 from spotipy import Spotify
 from spotipy.oauth2 import SpotifyClientCredentials
-
+from sklearn.cluster import KMeans
 
 client_id = st.secrets["SPOTIPY_CLIENT_ID"]
 client_secret = st.secrets["SPOTIPY_CLIENT_SECRET"]
@@ -16,7 +15,6 @@ spotify = Spotify(
         client_id=client_id, client_secret=client_secret
     )
 )
-
 
 features = [
     "danceability",
@@ -39,25 +37,29 @@ def load_data():
     df["duration_sec"] = df["duration_ms"] / 1000
     return df.dropna().reset_index(drop=True)
 
-
 @st.cache_resource
-def create_model(df):
+def create_model(df, n_clusters=12):
     scaler = MinMaxScaler()
     df_scaled = scaler.fit_transform(df[features])
-    knn = NearestNeighbors(n_neighbors=20, metric="cosine")
-    knn.fit(df_scaled)
-    return scaler, knn
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    df["cluster"] = kmeans.fit_predict(df_scaled)
+    return scaler, kmeans, df
 
 
-def get_recommendations(song_name, df, knn, scaler, n_songs=5):
-    song_idx = df[df["track_name"].str.lower() == song_name.lower()].index
-    if len(song_idx) == 0:
+def get_recommendations(song_name, df, scaler, kmeans, n_songs=5):
+    song_row = df[df["track_name"].str.lower() == song_name.lower()]
+    if song_row.empty:
         return pd.DataFrame()
 
-    song_features = df.loc[song_idx[0], features].values.reshape(1, -1)
-    song_scaled = scaler.transform(song_features)
-    distances, indices = knn.kneighbors(song_scaled, n_neighbors=n_songs + 1)
-    return df.iloc[indices[0][1:]]
+    cluster_label = song_row["cluster"].values[0]
+    same_cluster_songs = df[df["cluster"] == cluster_label]
+
+    # Supprimer la chanson originale
+    same_cluster_songs = same_cluster_songs[
+        same_cluster_songs["track_name"].str.lower() != song_name.lower()
+    ]
+
+    return same_cluster_songs.sample(n=min(n_songs, len(same_cluster_songs)))
 
 
 def get_spotify_info(track_name, artist_name):
@@ -85,7 +87,7 @@ st.set_page_config(page_title="Recommandation Musicale", page_icon="🎵", layou
 st.title("🎵 Recommandation Musicale Spotify")
 
 df = load_data()
-scaler, knn = create_model(df)
+scaler, kmeans, df = create_model(df)
 
 col1, col2 = st.columns([1, 2])
 
@@ -117,7 +119,9 @@ with col2:
                 if spotify_info["preview"]:
                     st.audio(spotify_info["preview"])
 
-            recommendations = get_recommendations(song_input, df, knn, scaler, n_recs)
+            recommendations = get_recommendations(
+                song_input, df, scaler, kmeans, n_recs
+            )
 
             if not recommendations.empty:
                 st.subheader("Recommandations:")
